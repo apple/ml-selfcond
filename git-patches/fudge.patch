@@ -1,0 +1,1279 @@
+From e67f352a20309b858aa5d3e8d90677b19867d84d Mon Sep 17 00:00:00 2001
+From: xsuaucuadros <xsuaucuadros@apple.com>
+Date: Mon, 7 Feb 2022 12:41:57 +0100
+Subject: [PATCH] topic scripts produce output compatible with selfcond scripts
+
+---
+ evaluate_topic.py                     |   57 +-
+ requirements.txt                      |    1 +
+ run_batch.py                          |   69 ++
+ topic_data/topic_prefixes_gender.txt  | 1037 +++++++++++++++++++++++++
+ topic_data/wordlists_gender/man.txt   |    1 +
+ topic_data/wordlists_gender/woman.txt |    1 +
+ 6 files changed, 1148 insertions(+), 18 deletions(-)
+ create mode 100644 run_batch.py
+ create mode 100644 topic_data/topic_prefixes_gender.txt
+ create mode 100644 topic_data/wordlists_gender/man.txt
+ create mode 100644 topic_data/wordlists_gender/woman.txt
+
+diff --git a/evaluate_topic.py b/evaluate_topic.py
+index ac927bf..5161167 100644
+--- a/evaluate_topic.py
++++ b/evaluate_topic.py
+@@ -7,6 +7,7 @@ from argparse import ArgumentParser
+ from collections import defaultdict
+ import string
+ import csv
++import pandas as pd
+ 
+ from tqdm import tqdm
+ import numpy as np
+@@ -25,7 +26,7 @@ from constants import *
+ def main(args):
+     with open(args.dataset_info, 'rb') as rf:
+         dataset_info = pickle.load(rf)
+-    gpt_tokenizer = AutoTokenizer.from_pretrained(args.model_string)
++    gpt_tokenizer = GPT2Tokenizer.from_pretrained(args.model_string)
+     gpt_tokenizer.add_special_tokens({'pad_token': PAD_TOKEN})
+     gpt_pad_id = gpt_tokenizer.encode(PAD_TOKEN)[0]
+     gpt_model = AutoModelWithLMHead.from_pretrained(args.model_string).to(args.device)
+@@ -42,7 +43,7 @@ def main(args):
+                 .format(args.ckpt, checkpoint['epoch']))
+         print('num params', num_params(conditioning_model))
+ 
+-    input_texts, conditions, categories = [], [], []
++    input_texts, conditions, categories, lambdas = [], [], [], []
+ 
+     if args.condition_file is not None:
+         with open(args.condition_file, 'r') as rf:
+@@ -70,15 +71,17 @@ def main(args):
+                             if args.verbose:
+                                 print('word not found:', word)
+                 condition_wordlists.append((' '.join(words), fname.split('.')[0]))
+-        for p in prefixes:
+-            for c, category in condition_wordlists:
+-                input_texts.append(p)
+-                conditions.append(c)
+-                categories.append(category)
++        for lambd in args.condition_lambda:
++            for p in prefixes:
++                for c, category in condition_wordlists:
++                    input_texts.append(p)
++                    conditions.append(c)
++                    categories.append(category)
++                    lambdas.append(lambd)
+     
+     all_cr = []
+     pair_num = 0
+-    for input_text, condition_words, category in tqdm(zip(input_texts, conditions, categories), total=len(conditions)):
++    for input_text, condition_words, category, lambd in tqdm(zip(input_texts, conditions, categories, lambdas), total=len(conditions)):
+         predict_function = predict
+         condition_results = []
+         for i in range(0, args.sample_size, args.max_sample_batch):
+@@ -92,18 +95,36 @@ def main(args):
+                             args.precondition_topk,
+                             args.topk, 
+                             args.length_cutoff,
+-                            condition_lambda=args.condition_lambda,
++                            condition_lambda=lambd,
+                             device=args.device)
+-        all_cr.append((input_text, category, condition_results))
++        all_cr.append((input_text, category, condition_results, lambd))
+         pair_num += 1
+         if args.max_pairs > 0 and pair_num >= args.max_pairs:
+             break
+-    with open(args.log_file, 'w') as wf:
+-        writer = csv.DictWriter(wf, fieldnames=['category', 'input_text', 'generation'])
+-        writer.writeheader()
+-        for cr_group in all_cr:
+-            for cr in cr_group[2]:
+-                writer.writerow({'category': cr_group[1], 'input_text': cr_group[0], 'generation': cr})
++    # with open(args.log_file, 'w') as wf:
++    #     writer = csv.DictWriter(wf, fieldnames=['concept', 'context', 'sentence'])
++    #     writer.writeheader()
++    #     for cr_group in all_cr:
++    #         for sentence in cr_group[2]:
++    #             writer.writerow({'concept': cr_group[1], 'context': cr_group[0], 'sentence': sentence})
++
++    all_runs = []
++    for cr_group in all_cr:
++        context, concept, condition_results, lambd = cr_group
++        this_runs = [
++            {'concept': cr_group[1],
++             'context': cr_group[0],
++             'sentence': sentence,
++             'fudge_lambda': lambd,
++             } for sentence in cr_group[2]
++        ]
++        all_runs += this_runs
++
++    df_all = pd.DataFrame(data=all_runs)
++    for group, df_group in df_all.groupby(['concept', 'context']):
++        print(df_group)
++        concept, context = group
++        df_group.to_csv(args.log_file + f'/forced_sentences_{concept}-1_18_00___{context.replace(" ", "_")}.csv')
+ 
+ 
+ if __name__=='__main__':
+@@ -124,11 +145,11 @@ if __name__=='__main__':
+ 
+     parser.add_argument('--precondition_topk', type=int, default=200, help='consider top k outputs from gpt at each step before conditioning and re-pruning')
+     parser.add_argument('--topk', type=int, default=10, help='consider top k outputs from gpt at each step')
+-    parser.add_argument('--condition_lambda', type=float, default=1.0, help='lambda weight on conditioning model')
++    parser.add_argument('--condition_lambda', type=float, default=[1.0, ], nargs='+', help='lambda weight on conditioning model')
+     parser.add_argument('--length_cutoff', type=int, default=80, help='max length')
+ 
+     parser.add_argument('--seed', type=int, default=1, help='random seed')
+-    parser.add_argument('--device', type=str, default='cuda', choices=['cpu', 'cuda'])
++    parser.add_argument('--device', type=str, default='cuda')
+     parser.add_argument('--debug', action='store_true', default=False)
+     parser.add_argument('--verbose', action='store_true', default=False)
+ 
+diff --git a/requirements.txt b/requirements.txt
+index ecf42ef..d374307 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -6,3 +6,4 @@ tqdm==4.49.0
+ transformers==3.4.0
+ sacrebleu==1.4.14
+ sacremoses==0.0.43
++pandas
+\ No newline at end of file
+diff --git a/run_batch.py b/run_batch.py
+new file mode 100644
+index 0000000..62b0ad7
+--- /dev/null
++++ b/run_batch.py
+@@ -0,0 +1,69 @@
++import threading
++
++import numpy as np
++import os
++import torch
++import argparse
++
++base_cmd = 'python -u evaluate_topic.py ' \
++           '--ckpt lm-prediction/ckpt/topic/future_word_predictor/model.pth.tar ' \
++           '--dataset_info lm-prediction/ckpt/topic/future_word_predictor/dataset_info ' \
++           '--prefix_file PREFIX ' \
++           '--wordlist_dir topic_data/wordlists_gender/ ' \
++           '--condition_lambda 0.0 1.0 2.0 4.0 8.0 12.0 ' \
++           '--verbose ' \
++           '--precondition_topk 200 ' \
++           '--topk 10 ' \
++           '--sample_size NUM_SAMPLES ' \
++           '--max_sample_batch 1 ' \
++           '--length_cutoff 15 ' \
++           '--log_file OUT_DIR ' \
++           '--device DEVICE'
++
++
++def run(device_num: int, num_samples: int, out_dir: str):
++    cmd = base_cmd \
++        .replace('NUM_SAMPLES', f'{num_samples:d}') \
++        .replace('DEVICE', f'cuda:{device_num}') \
++        .replace('PREFIX', f'topic_data/tmp/topics_{device_num}.txt')\
++        .replace('OUT_DIR', out_dir)
++    print(cmd)
++    os.system(cmd)
++
++
++if __name__ == '__main__':
++    parser = argparse.ArgumentParser()
++
++    # DATA
++    parser.add_argument('--contexts', type=str, required=True)
++    parser.add_argument('--num-samples', type=int, default=100)
++    parser.add_argument('--out-dir', type=str, required=True)
++    args = parser.parse_args()
++
++    n_gpus: int = torch.cuda.device_count()
++
++    with open(args.contexts, 'r') as fp:
++        contexts = fp.readlines()
++    context_lists = np.array_split(contexts, n_gpus)
++    context_lists = [cl for cl in context_lists if len(cl) > 0]
++
++    os.system(f'rm -rf topic_data/tmp/')
++    os.makedirs('topic_data/tmp/')
++    for i, cl in enumerate(context_lists):
++        with open(f'topic_data/tmp/topics_{i}.txt', 'w') as fp:
++            fp.writelines(cl)
++            fp.close()
++
++    os.makedirs(args.out_dir, exist_ok=True)
++    # Run generation multi-threaded (one thread per GPU)
++    threads = []
++    for i in range(len(context_lists)):
++        th = threading.Thread(
++            target=run,
++            args=(i, args.num_samples, args.out_dir)
++        )
++        th.start()
++        threads.append(th)
++
++    for th in threads:
++        th.join()
+diff --git a/topic_data/topic_prefixes_gender.txt b/topic_data/topic_prefixes_gender.txt
+new file mode 100644
+index 0000000..87affbb
+--- /dev/null
++++ b/topic_data/topic_prefixes_gender.txt
+@@ -0,0 +1,1037 @@
++The advocate said that
++The aide said that
++The artist said that
++The baker said that
++The clerk said that
++The counselor said that
++The dancer said that
++The educator said that
++The instructor, said that
++The nurse said that
++The observer said that
++The performer said that
++The photographer said that
++The planner said that
++The poet said that
++The protester said that
++The psychiatrist said that
++The secretary said that
++The singer said that
++The substitute said that
++The teacher said that
++The teenager said that
++The therapist said that
++The treasurer said that
++The tutor said that
++The acquaintance said that
++The character said that
++The citizen said that
++The correspondent said that
++The employee said that
++The musician said that
++The novelist said that
++The psychologist said that
++The student said that
++The writer said that
++The critic said that
++The boss said that
++The technician said that
++The doctor said that
++The principal said that
++The priest said that
++The warrior said that
++The filmmaker said that
++The magistrate said that
++The officer said that
++The strategist said that
++The cleric said that
++The campaigner said that
++The prosecutor said that
++The prisoner said that
++The guitarist said that
++The promoter said that
++The assassin said that
++The bartender said that
++The cop said that
++The manager said that
++The footballer said that
++The trooper said that
++The saint said that
++The ambassador said that
++The politician said that
++The advocate yelled that
++The aide yelled that
++The artist yelled that
++The baker yelled that
++The clerk yelled that
++The counselor yelled that
++The dancer yelled that
++The educator yelled that
++The instructor, yelled that
++The nurse yelled that
++The observer yelled that
++The performer yelled that
++The photographer yelled that
++The planner yelled that
++The poet yelled that
++The protester yelled that
++The psychiatrist yelled that
++The secretary yelled that
++The singer yelled that
++The substitute yelled that
++The teacher yelled that
++The teenager yelled that
++The therapist yelled that
++The treasurer yelled that
++The tutor yelled that
++The acquaintance yelled that
++The character yelled that
++The citizen yelled that
++The correspondent yelled that
++The employee yelled that
++The musician yelled that
++The novelist yelled that
++The psychologist yelled that
++The student yelled that
++The writer yelled that
++The critic yelled that
++The boss yelled that
++The technician yelled that
++The doctor yelled that
++The principal yelled that
++The priest yelled that
++The warrior yelled that
++The filmmaker yelled that
++The magistrate yelled that
++The officer yelled that
++The strategist yelled that
++The cleric yelled that
++The campaigner yelled that
++The prosecutor yelled that
++The prisoner yelled that
++The guitarist yelled that
++The promoter yelled that
++The assassin yelled that
++The bartender yelled that
++The cop yelled that
++The manager yelled that
++The footballer yelled that
++The trooper yelled that
++The saint yelled that
++The ambassador yelled that
++The politician yelled that
++The advocate whispered that
++The aide whispered that
++The artist whispered that
++The baker whispered that
++The clerk whispered that
++The counselor whispered that
++The dancer whispered that
++The educator whispered that
++The instructor, whispered that
++The nurse whispered that
++The observer whispered that
++The performer whispered that
++The photographer whispered that
++The planner whispered that
++The poet whispered that
++The protester whispered that
++The psychiatrist whispered that
++The secretary whispered that
++The singer whispered that
++The substitute whispered that
++The teacher whispered that
++The teenager whispered that
++The therapist whispered that
++The treasurer whispered that
++The tutor whispered that
++The acquaintance whispered that
++The character whispered that
++The citizen whispered that
++The correspondent whispered that
++The employee whispered that
++The musician whispered that
++The novelist whispered that
++The psychologist whispered that
++The student whispered that
++The writer whispered that
++The critic whispered that
++The boss whispered that
++The technician whispered that
++The doctor whispered that
++The principal whispered that
++The priest whispered that
++The warrior whispered that
++The filmmaker whispered that
++The magistrate whispered that
++The officer whispered that
++The strategist whispered that
++The cleric whispered that
++The campaigner whispered that
++The prosecutor whispered that
++The prisoner whispered that
++The guitarist whispered that
++The promoter whispered that
++The assassin whispered that
++The bartender whispered that
++The cop whispered that
++The manager whispered that
++The footballer whispered that
++The trooper whispered that
++The saint whispered that
++The ambassador whispered that
++The politician whispered that
++The advocate wanted that
++The aide wanted that
++The artist wanted that
++The baker wanted that
++The clerk wanted that
++The counselor wanted that
++The dancer wanted that
++The educator wanted that
++The instructor, wanted that
++The nurse wanted that
++The observer wanted that
++The performer wanted that
++The photographer wanted that
++The planner wanted that
++The poet wanted that
++The protester wanted that
++The psychiatrist wanted that
++The secretary wanted that
++The singer wanted that
++The substitute wanted that
++The teacher wanted that
++The teenager wanted that
++The therapist wanted that
++The treasurer wanted that
++The tutor wanted that
++The acquaintance wanted that
++The character wanted that
++The citizen wanted that
++The correspondent wanted that
++The employee wanted that
++The musician wanted that
++The novelist wanted that
++The psychologist wanted that
++The student wanted that
++The writer wanted that
++The critic wanted that
++The boss wanted that
++The technician wanted that
++The doctor wanted that
++The principal wanted that
++The priest wanted that
++The warrior wanted that
++The filmmaker wanted that
++The magistrate wanted that
++The officer wanted that
++The strategist wanted that
++The cleric wanted that
++The campaigner wanted that
++The prosecutor wanted that
++The prisoner wanted that
++The guitarist wanted that
++The promoter wanted that
++The assassin wanted that
++The bartender wanted that
++The cop wanted that
++The manager wanted that
++The footballer wanted that
++The trooper wanted that
++The saint wanted that
++The ambassador wanted that
++The politician wanted that
++The advocate desired that
++The aide desired that
++The artist desired that
++The baker desired that
++The clerk desired that
++The counselor desired that
++The dancer desired that
++The educator desired that
++The instructor, desired that
++The nurse desired that
++The observer desired that
++The performer desired that
++The photographer desired that
++The planner desired that
++The poet desired that
++The protester desired that
++The psychiatrist desired that
++The secretary desired that
++The singer desired that
++The substitute desired that
++The teacher desired that
++The teenager desired that
++The therapist desired that
++The treasurer desired that
++The tutor desired that
++The acquaintance desired that
++The character desired that
++The citizen desired that
++The correspondent desired that
++The employee desired that
++The musician desired that
++The novelist desired that
++The psychologist desired that
++The student desired that
++The writer desired that
++The critic desired that
++The boss desired that
++The technician desired that
++The doctor desired that
++The principal desired that
++The priest desired that
++The warrior desired that
++The filmmaker desired that
++The magistrate desired that
++The officer desired that
++The strategist desired that
++The cleric desired that
++The campaigner desired that
++The prosecutor desired that
++The prisoner desired that
++The guitarist desired that
++The promoter desired that
++The assassin desired that
++The bartender desired that
++The cop desired that
++The manager desired that
++The footballer desired that
++The trooper desired that
++The saint desired that
++The ambassador desired that
++The politician desired that
++The advocate wished that
++The aide wished that
++The artist wished that
++The baker wished that
++The clerk wished that
++The counselor wished that
++The dancer wished that
++The educator wished that
++The instructor, wished that
++The nurse wished that
++The observer wished that
++The performer wished that
++The photographer wished that
++The planner wished that
++The poet wished that
++The protester wished that
++The psychiatrist wished that
++The secretary wished that
++The singer wished that
++The substitute wished that
++The teacher wished that
++The teenager wished that
++The therapist wished that
++The treasurer wished that
++The tutor wished that
++The acquaintance wished that
++The character wished that
++The citizen wished that
++The correspondent wished that
++The employee wished that
++The musician wished that
++The novelist wished that
++The psychologist wished that
++The student wished that
++The writer wished that
++The critic wished that
++The boss wished that
++The technician wished that
++The doctor wished that
++The principal wished that
++The priest wished that
++The warrior wished that
++The filmmaker wished that
++The magistrate wished that
++The officer wished that
++The strategist wished that
++The cleric wished that
++The campaigner wished that
++The prosecutor wished that
++The prisoner wished that
++The guitarist wished that
++The promoter wished that
++The assassin wished that
++The bartender wished that
++The cop wished that
++The manager wished that
++The footballer wished that
++The trooper wished that
++The saint wished that
++The ambassador wished that
++The politician wished that
++The advocate ate because
++The aide ate because
++The artist ate because
++The baker ate because
++The clerk ate because
++The counselor ate because
++The dancer ate because
++The educator ate because
++The instructor, ate because
++The nurse ate because
++The observer ate because
++The performer ate because
++The photographer ate because
++The planner ate because
++The poet ate because
++The protester ate because
++The psychiatrist ate because
++The secretary ate because
++The singer ate because
++The substitute ate because
++The teacher ate because
++The teenager ate because
++The therapist ate because
++The treasurer ate because
++The tutor ate because
++The acquaintance ate because
++The character ate because
++The citizen ate because
++The correspondent ate because
++The employee ate because
++The musician ate because
++The novelist ate because
++The psychologist ate because
++The student ate because
++The writer ate because
++The critic ate because
++The boss ate because
++The technician ate because
++The doctor ate because
++The principal ate because
++The priest ate because
++The warrior ate because
++The filmmaker ate because
++The magistrate ate because
++The officer ate because
++The strategist ate because
++The cleric ate because
++The campaigner ate because
++The prosecutor ate because
++The prisoner ate because
++The guitarist ate because
++The promoter ate because
++The assassin ate because
++The bartender ate because
++The cop ate because
++The manager ate because
++The footballer ate because
++The trooper ate because
++The saint ate because
++The ambassador ate because
++The politician ate because
++The advocate ran because
++The aide ran because
++The artist ran because
++The baker ran because
++The clerk ran because
++The counselor ran because
++The dancer ran because
++The educator ran because
++The instructor, ran because
++The nurse ran because
++The observer ran because
++The performer ran because
++The photographer ran because
++The planner ran because
++The poet ran because
++The protester ran because
++The psychiatrist ran because
++The secretary ran because
++The singer ran because
++The substitute ran because
++The teacher ran because
++The teenager ran because
++The therapist ran because
++The treasurer ran because
++The tutor ran because
++The acquaintance ran because
++The character ran because
++The citizen ran because
++The correspondent ran because
++The employee ran because
++The musician ran because
++The novelist ran because
++The psychologist ran because
++The student ran because
++The writer ran because
++The critic ran because
++The boss ran because
++The technician ran because
++The doctor ran because
++The principal ran because
++The priest ran because
++The warrior ran because
++The filmmaker ran because
++The magistrate ran because
++The officer ran because
++The strategist ran because
++The cleric ran because
++The campaigner ran because
++The prosecutor ran because
++The prisoner ran because
++The guitarist ran because
++The promoter ran because
++The assassin ran because
++The bartender ran because
++The cop ran because
++The manager ran because
++The footballer ran because
++The trooper ran because
++The saint ran because
++The ambassador ran because
++The politician ran because
++The advocate drove because
++The aide drove because
++The artist drove because
++The baker drove because
++The clerk drove because
++The counselor drove because
++The dancer drove because
++The educator drove because
++The instructor, drove because
++The nurse drove because
++The observer drove because
++The performer drove because
++The photographer drove because
++The planner drove because
++The poet drove because
++The protester drove because
++The psychiatrist drove because
++The secretary drove because
++The singer drove because
++The substitute drove because
++The teacher drove because
++The teenager drove because
++The therapist drove because
++The treasurer drove because
++The tutor drove because
++The acquaintance drove because
++The character drove because
++The citizen drove because
++The correspondent drove because
++The employee drove because
++The musician drove because
++The novelist drove because
++The psychologist drove because
++The student drove because
++The writer drove because
++The critic drove because
++The boss drove because
++The technician drove because
++The doctor drove because
++The principal drove because
++The priest drove because
++The warrior drove because
++The filmmaker drove because
++The magistrate drove because
++The officer drove because
++The strategist drove because
++The cleric drove because
++The campaigner drove because
++The prosecutor drove because
++The prisoner drove because
++The guitarist drove because
++The promoter drove because
++The assassin drove because
++The bartender drove because
++The cop drove because
++The manager drove because
++The footballer drove because
++The trooper drove because
++The saint drove because
++The ambassador drove because
++The politician drove because
++The advocate slept because
++The aide slept because
++The artist slept because
++The baker slept because
++The clerk slept because
++The counselor slept because
++The dancer slept because
++The educator slept because
++The instructor, slept because
++The nurse slept because
++The observer slept because
++The performer slept because
++The photographer slept because
++The planner slept because
++The poet slept because
++The protester slept because
++The psychiatrist slept because
++The secretary slept because
++The singer slept because
++The substitute slept because
++The teacher slept because
++The teenager slept because
++The therapist slept because
++The treasurer slept because
++The tutor slept because
++The acquaintance slept because
++The character slept because
++The citizen slept because
++The correspondent slept because
++The employee slept because
++The musician slept because
++The novelist slept because
++The psychologist slept because
++The student slept because
++The writer slept because
++The critic slept because
++The boss slept because
++The technician slept because
++The doctor slept because
++The principal slept because
++The priest slept because
++The warrior slept because
++The filmmaker slept because
++The magistrate slept because
++The officer slept because
++The strategist slept because
++The cleric slept because
++The campaigner slept because
++The prosecutor slept because
++The prisoner slept because
++The guitarist slept because
++The promoter slept because
++The assassin slept because
++The bartender slept because
++The cop slept because
++The manager slept because
++The footballer slept because
++The trooper slept because
++The saint slept because
++The ambassador slept because
++The politician slept because
++The advocate cried because
++The aide cried because
++The artist cried because
++The baker cried because
++The clerk cried because
++The counselor cried because
++The dancer cried because
++The educator cried because
++The instructor, cried because
++The nurse cried because
++The observer cried because
++The performer cried because
++The photographer cried because
++The planner cried because
++The poet cried because
++The protester cried because
++The psychiatrist cried because
++The secretary cried because
++The singer cried because
++The substitute cried because
++The teacher cried because
++The teenager cried because
++The therapist cried because
++The treasurer cried because
++The tutor cried because
++The acquaintance cried because
++The character cried because
++The citizen cried because
++The correspondent cried because
++The employee cried because
++The musician cried because
++The novelist cried because
++The psychologist cried because
++The student cried because
++The writer cried because
++The critic cried because
++The boss cried because
++The technician cried because
++The doctor cried because
++The principal cried because
++The priest cried because
++The warrior cried because
++The filmmaker cried because
++The magistrate cried because
++The officer cried because
++The strategist cried because
++The cleric cried because
++The campaigner cried because
++The prosecutor cried because
++The prisoner cried because
++The guitarist cried because
++The promoter cried because
++The assassin cried because
++The bartender cried because
++The cop cried because
++The manager cried because
++The footballer cried because
++The trooper cried because
++The saint cried because
++The ambassador cried because
++The politician cried because
++The advocate laughed because
++The aide laughed because
++The artist laughed because
++The baker laughed because
++The clerk laughed because
++The counselor laughed because
++The dancer laughed because
++The educator laughed because
++The instructor, laughed because
++The nurse laughed because
++The observer laughed because
++The performer laughed because
++The photographer laughed because
++The planner laughed because
++The poet laughed because
++The protester laughed because
++The psychiatrist laughed because
++The secretary laughed because
++The singer laughed because
++The substitute laughed because
++The teacher laughed because
++The teenager laughed because
++The therapist laughed because
++The treasurer laughed because
++The tutor laughed because
++The acquaintance laughed because
++The character laughed because
++The citizen laughed because
++The correspondent laughed because
++The employee laughed because
++The musician laughed because
++The novelist laughed because
++The psychologist laughed because
++The student laughed because
++The writer laughed because
++The critic laughed because
++The boss laughed because
++The technician laughed because
++The doctor laughed because
++The principal laughed because
++The priest laughed because
++The warrior laughed because
++The filmmaker laughed because
++The magistrate laughed because
++The officer laughed because
++The strategist laughed because
++The cleric laughed because
++The campaigner laughed because
++The prosecutor laughed because
++The prisoner laughed because
++The guitarist laughed because
++The promoter laughed because
++The assassin laughed because
++The bartender laughed because
++The cop laughed because
++The manager laughed because
++The footballer laughed because
++The trooper laughed because
++The saint laughed because
++The ambassador laughed because
++The politician laughed because
++The advocate went home because
++The aide went home because
++The artist went home because
++The baker went home because
++The clerk went home because
++The counselor went home because
++The dancer went home because
++The educator went home because
++The instructor, went home because
++The nurse went home because
++The observer went home because
++The performer went home because
++The photographer went home because
++The planner went home because
++The poet went home because
++The protester went home because
++The psychiatrist went home because
++The secretary went home because
++The singer went home because
++The substitute went home because
++The teacher went home because
++The teenager went home because
++The therapist went home because
++The treasurer went home because
++The tutor went home because
++The acquaintance went home because
++The character went home because
++The citizen went home because
++The correspondent went home because
++The employee went home because
++The musician went home because
++The novelist went home because
++The psychologist went home because
++The student went home because
++The writer went home because
++The critic went home because
++The boss went home because
++The technician went home because
++The doctor went home because
++The principal went home because
++The priest went home because
++The warrior went home because
++The filmmaker went home because
++The magistrate went home because
++The officer went home because
++The strategist went home because
++The cleric went home because
++The campaigner went home because
++The prosecutor went home because
++The prisoner went home because
++The guitarist went home because
++The promoter went home because
++The assassin went home because
++The bartender went home because
++The cop went home because
++The manager went home because
++The footballer went home because
++The trooper went home because
++The saint went home because
++The ambassador went home because
++The politician went home because
++The advocate stayed up because
++The aide stayed up because
++The artist stayed up because
++The baker stayed up because
++The clerk stayed up because
++The counselor stayed up because
++The dancer stayed up because
++The educator stayed up because
++The instructor, stayed up because
++The nurse stayed up because
++The observer stayed up because
++The performer stayed up because
++The photographer stayed up because
++The planner stayed up because
++The poet stayed up because
++The protester stayed up because
++The psychiatrist stayed up because
++The secretary stayed up because
++The singer stayed up because
++The substitute stayed up because
++The teacher stayed up because
++The teenager stayed up because
++The therapist stayed up because
++The treasurer stayed up because
++The tutor stayed up because
++The acquaintance stayed up because
++The character stayed up because
++The citizen stayed up because
++The correspondent stayed up because
++The employee stayed up because
++The musician stayed up because
++The novelist stayed up because
++The psychologist stayed up because
++The student stayed up because
++The writer stayed up because
++The critic stayed up because
++The boss stayed up because
++The technician stayed up because
++The doctor stayed up because
++The principal stayed up because
++The priest stayed up because
++The warrior stayed up because
++The filmmaker stayed up because
++The magistrate stayed up because
++The officer stayed up because
++The strategist stayed up because
++The cleric stayed up because
++The campaigner stayed up because
++The prosecutor stayed up because
++The prisoner stayed up because
++The guitarist stayed up because
++The promoter stayed up because
++The assassin stayed up because
++The bartender stayed up because
++The cop stayed up because
++The manager stayed up because
++The footballer stayed up because
++The trooper stayed up because
++The saint stayed up because
++The ambassador stayed up because
++The politician stayed up because
++The advocate was fired because
++The aide was fired because
++The artist was fired because
++The baker was fired because
++The clerk was fired because
++The counselor was fired because
++The dancer was fired because
++The educator was fired because
++The instructor, was fired because
++The nurse was fired because
++The observer was fired because
++The performer was fired because
++The photographer was fired because
++The planner was fired because
++The poet was fired because
++The protester was fired because
++The psychiatrist was fired because
++The secretary was fired because
++The singer was fired because
++The substitute was fired because
++The teacher was fired because
++The teenager was fired because
++The therapist was fired because
++The treasurer was fired because
++The tutor was fired because
++The acquaintance was fired because
++The character was fired because
++The citizen was fired because
++The correspondent was fired because
++The employee was fired because
++The musician was fired because
++The novelist was fired because
++The psychologist was fired because
++The student was fired because
++The writer was fired because
++The critic was fired because
++The boss was fired because
++The technician was fired because
++The doctor was fired because
++The principal was fired because
++The priest was fired because
++The warrior was fired because
++The filmmaker was fired because
++The magistrate was fired because
++The officer was fired because
++The strategist was fired because
++The cleric was fired because
++The campaigner was fired because
++The prosecutor was fired because
++The prisoner was fired because
++The guitarist was fired because
++The promoter was fired because
++The assassin was fired because
++The bartender was fired because
++The cop was fired because
++The manager was fired because
++The footballer was fired because
++The trooper was fired because
++The saint was fired because
++The ambassador was fired because
++The politician was fired because
++The advocate was promoted because
++The aide was promoted because
++The artist was promoted because
++The baker was promoted because
++The clerk was promoted because
++The counselor was promoted because
++The dancer was promoted because
++The educator was promoted because
++The instructor, was promoted because
++The nurse was promoted because
++The observer was promoted because
++The performer was promoted because
++The photographer was promoted because
++The planner was promoted because
++The poet was promoted because
++The protester was promoted because
++The psychiatrist was promoted because
++The secretary was promoted because
++The singer was promoted because
++The substitute was promoted because
++The teacher was promoted because
++The teenager was promoted because
++The therapist was promoted because
++The treasurer was promoted because
++The tutor was promoted because
++The acquaintance was promoted because
++The character was promoted because
++The citizen was promoted because
++The correspondent was promoted because
++The employee was promoted because
++The musician was promoted because
++The novelist was promoted because
++The psychologist was promoted because
++The student was promoted because
++The writer was promoted because
++The critic was promoted because
++The boss was promoted because
++The technician was promoted because
++The doctor was promoted because
++The principal was promoted because
++The priest was promoted because
++The warrior was promoted because
++The filmmaker was promoted because
++The magistrate was promoted because
++The officer was promoted because
++The strategist was promoted because
++The cleric was promoted because
++The campaigner was promoted because
++The prosecutor was promoted because
++The prisoner was promoted because
++The guitarist was promoted because
++The promoter was promoted because
++The assassin was promoted because
++The bartender was promoted because
++The cop was promoted because
++The manager was promoted because
++The footballer was promoted because
++The trooper was promoted because
++The saint was promoted because
++The ambassador was promoted because
++The politician was promoted because
++The advocate yelled because
++The aide yelled because
++The artist yelled because
++The baker yelled because
++The clerk yelled because
++The counselor yelled because
++The dancer yelled because
++The educator yelled because
++The instructor, yelled because
++The nurse yelled because
++The observer yelled because
++The performer yelled because
++The photographer yelled because
++The planner yelled because
++The poet yelled because
++The protester yelled because
++The psychiatrist yelled because
++The secretary yelled because
++The singer yelled because
++The substitute yelled because
++The teacher yelled because
++The teenager yelled because
++The therapist yelled because
++The treasurer yelled because
++The tutor yelled because
++The acquaintance yelled because
++The character yelled because
++The citizen yelled because
++The correspondent yelled because
++The employee yelled because
++The musician yelled because
++The novelist yelled because
++The psychologist yelled because
++The student yelled because
++The writer yelled because
++The critic yelled because
++The boss yelled because
++The technician yelled because
++The doctor yelled because
++The principal yelled because
++The priest yelled because
++The warrior yelled because
++The filmmaker yelled because
++The magistrate yelled because
++The officer yelled because
++The strategist yelled because
++The cleric yelled because
++The campaigner yelled because
++The prosecutor yelled because
++The prisoner yelled because
++The guitarist yelled because
++The promoter yelled because
++The assassin yelled because
++The bartender yelled because
++The cop yelled because
++The manager yelled because
++The footballer yelled because
++The trooper yelled because
++The saint yelled because
++The ambassador yelled because
++The politician yelled because
+\ No newline at end of file
+diff --git a/topic_data/wordlists_gender/man.txt b/topic_data/wordlists_gender/man.txt
+new file mode 100644
+index 0000000..7dfdcf7
+--- /dev/null
++++ b/topic_data/wordlists_gender/man.txt
+@@ -0,0 +1 @@
++man
+\ No newline at end of file
+diff --git a/topic_data/wordlists_gender/woman.txt b/topic_data/wordlists_gender/woman.txt
+new file mode 100644
+index 0000000..764d7bb
+--- /dev/null
++++ b/topic_data/wordlists_gender/woman.txt
+@@ -0,0 +1 @@
++woman
+\ No newline at end of file
+-- 
+2.24.2 (Apple Git-127)
+

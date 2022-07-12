@@ -1,0 +1,215 @@
+From 1b234ffa1e7a12698b93231fbc47da73190df60e Mon Sep 17 00:00:00 2001
+From: Xavier Suau <xavisuau@users.noreply.github.com>
+Date: Thu, 17 Feb 2022 16:26:15 +0100
+Subject: [PATCH] Master selfcond (#2)
+
+Changes for compatibility with selfcond.
+---
+ concepts/man.txt   |  1 +
+ concepts/woman.txt |  1 +
+ run_pplm.py        | 65 ++++++++++++++++++++++++++++++++++++----------
+ 3 files changed, 53 insertions(+), 14 deletions(-)
+ create mode 100644 concepts/man.txt
+ create mode 100644 concepts/woman.txt
+
+diff --git a/concepts/man.txt b/concepts/man.txt
+new file mode 100644
+index 0000000..2a3700c
+--- /dev/null
++++ b/concepts/man.txt
+@@ -0,0 +1 @@
++man
+diff --git a/concepts/woman.txt b/concepts/woman.txt
+new file mode 100644
+index 0000000..d550cb0
+--- /dev/null
++++ b/concepts/woman.txt
+@@ -0,0 +1 @@
++woman
+diff --git a/run_pplm.py b/run_pplm.py
+index d3c3cc6..6d837ee 100644
+--- a/run_pplm.py
++++ b/run_pplm.py
+@@ -22,11 +22,13 @@ Example command with discriminator:
+ python examples/run_pplm.py -D sentiment --class_label 3 --cond_text "The lake" --length 10 --gamma 1.0 --num_iterations 30 --num_samples 10 --stepsize 0.01 --kl_scale 0.01 --gm_scale 0.95
+ """
+ 
++from time import time
+ import argparse
+ import json
+ from operator import add
+ from typing import List, Optional, Tuple, Union
+-
++import pandas as pd
++from copy import deepcopy
+ import numpy as np
+ import torch
+ import torch.nn.functional as F
+@@ -38,6 +40,8 @@ from transformers.modeling_gpt2 import GPT2LMHeadModel
+ 
+ from pplm_classification_head import ClassificationHead
+ 
++from lmdiss.generation import top_k_top_p_filtering, set_seed
++
+ PPLM_BOW = 1
+ PPLM_DISCRIM = 2
+ PPLM_BOW_DISCRIM = 3
+@@ -65,6 +69,8 @@ BAG_OF_WORDS_ARCHIVE_MAP = {
+     'science': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/science.txt",
+     'space': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/space.txt",
+     'technology': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/technology.txt",
++    'woman': "PPLM_fork/concepts/woman.txt",
++    'man': "PPLM_fork/concepts/man.txt",
+ }
+ 
+ DISCRIMINATOR_MODELS_PARAMS = {
+@@ -469,6 +475,9 @@ def full_text_generation(
+     losses_in_time = []
+ 
+     for i in range(num_samples):
++        print(f'stepsize {stepsize:0.3f}, seed {i}')
++        set_seed(seed=i, gpu='cuda' in device)
++
+         pert_gen_tok_text, discrim_loss, loss_in_time = generate_text_pplm(
+             model=model,
+             tokenizer=tokenizer,
+@@ -645,7 +654,12 @@ def generate_text_pplm(
+ 
+         # sample or greedy
+         if sample:
+-            last = torch.multinomial(pert_probs, num_samples=1)
++            # last = torch.multinomial(pert_probs, num_samples=1)
++            # print(last.shape)
++            # print(pert_logits.shape)
++            filtered_logits = top_k_top_p_filtering(pert_logits[0], top_k=0, top_p=0.9)
++            last = torch.multinomial(F.softmax(filtered_logits, dim=-1), num_samples=1)
++            last = last.unsqueeze(dim=0)
+ 
+         else:
+             _, last = torch.topk(pert_probs, k=1, dim=-1)
+@@ -701,17 +715,19 @@ def run_pplm_example(
+         seed=0,
+         no_cuda=False,
+         colorama=False,
+-        verbosity='regular'
++        verbosity='regular',
++        device='cuda:0',
++        out_file='',
+ ):
+-    # set Random seed
+-    torch.manual_seed(seed)
+-    np.random.seed(seed)
++    # # set Random seed
++    # torch.manual_seed(seed)
++    # np.random.seed(seed)
+ 
+     # set verbosiry
+     verbosity_level = VERBOSITY_LEVELS.get(verbosity.lower(), REGULAR)
+ 
+     # set the device
+-    device = "cuda" if torch.cuda.is_available() and not no_cuda else "cpu"
++    # device = "cuda" if torch.cuda.is_available() and not no_cuda else "cpu"
+ 
+     if discrim == 'generic':
+         set_generic_model_params(discrim_weights, discrim_meta)
+@@ -753,7 +769,8 @@ def run_pplm_example(
+             print("Did you forget to add `--cond_text`? ")
+             raw_text = input("Model prompt >>> ")
+         tokenized_cond_text = tokenizer.encode(
+-            tokenizer.bos_token + raw_text,
++            # tokenizer.bos_token + raw_text,
++            raw_text,
+             add_special_tokens=False
+         )
+ 
+@@ -765,6 +782,7 @@ def run_pplm_example(
+ 
+     # full_text_generation returns:
+     # unpert_gen_tok_text, pert_gen_tok_texts, discrim_losses, losses_in_time
++    tic = time()
+     unpert_gen_tok_text, pert_gen_tok_texts, _, _ = full_text_generation(
+         model=model,
+         tokenizer=tokenizer,
+@@ -789,6 +807,8 @@ def run_pplm_example(
+         kl_scale=kl_scale,
+         verbosity_level=verbosity_level
+     )
++    toc = time()
++    print(f'Time: {toc-tic:0.3f}s')
+ 
+     # untokenize unperturbed text
+     unpert_gen_text = tokenizer.decode(unpert_gen_tok_text.tolist()[0])
+@@ -813,6 +833,7 @@ def run_pplm_example(
+ 
+     # iterate through the perturbed texts
+     for i, pert_gen_tok_text in enumerate(pert_gen_tok_texts):
++        pert_gen_text = ''
+         try:
+             # untokenize unperturbed text
+             if colorama:
+@@ -839,10 +860,10 @@ def run_pplm_example(
+ 
+         # keep the prefix, perturbed seq, original seq for each index
+         generated_texts.append(
+-            (tokenized_cond_text, pert_gen_tok_text, unpert_gen_tok_text)
++            (cond_text, pert_gen_text, stepsize, i, num_iterations, window_length, kl_scale, gm_scale, bag_of_words)
+         )
+ 
+-    return
++    return generated_texts
+ 
+ 
+ if __name__ == '__main__':
+@@ -851,7 +872,7 @@ if __name__ == '__main__':
+         "--pretrained_model",
+         "-M",
+         type=str,
+-        default="gpt2-medium",
++        default="gpt2",
+         help="pretrained model name or path to local checkpoint",
+     )
+     parser.add_argument(
+@@ -896,7 +917,7 @@ if __name__ == '__main__':
+         help="Class label used for the discriminator",
+     )
+     parser.add_argument("--length", type=int, default=100)
+-    parser.add_argument("--stepsize", type=float, default=0.02)
++    parser.add_argument("--stepsize", type=float, nargs='*')
+     parser.add_argument("--temperature", type=float, default=1.0)
+     parser.add_argument("--top_k", type=int, default=10)
+     parser.add_argument(
+@@ -924,13 +945,29 @@ if __name__ == '__main__':
+     parser.add_argument("--gm_scale", type=float, default=0.9)
+     parser.add_argument("--kl_scale", type=float, default=0.01)
+     parser.add_argument("--seed", type=int, default=0)
++    parser.add_argument("--device", type=str)
++    parser.add_argument("--out-file", type=str)
+     parser.add_argument("--no_cuda", action="store_true", help="no cuda")
+     parser.add_argument("--colorama", action="store_true",
+                         help="colors keywords")
+     parser.add_argument("--verbosity", type=str, default="very_verbose",
+                         choices=(
+                             "quiet", "regular", "verbose", "very_verbose"),
+-                        help="verbosiry level")
++                        help="verbosity level")
+ 
+     args = parser.parse_args()
+-    run_pplm_example(**vars(args))
++    results = []
++    for stepsize in args.stepsize:
++        my_args = deepcopy(args)
++        my_args.stepsize = stepsize
++        r = run_pplm_example(**vars(my_args))
++        df = pd.DataFrame(
++            columns=['context', 'sentence', 'stepsize', 'seed', 'num_iterations', 'window_length', 'kl_scale', 'gm_scale', 'concept'],
++            data=r
++        )
++        results.append(df)
++
++    df = pd.concat(results, ignore_index=True)
++    print(df[['sentence', 'stepsize']])
++
++    df.to_csv(args.out_file)
+-- 
+2.24.2 (Apple Git-127)
+

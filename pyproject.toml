@@ -1,0 +1,113 @@
+#
+# Copyright (C) 2022 Apple Inc. All rights reserved.
+#
+
+# Tell pip to use flit to build this package
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+
+# PEP 621 metadata (https://www.python.org/dev/peps/pep-0621/)
+# ============================================================================
+[project]
+
+name = "selfcond"
+authors = [
+    {name="Xavier Suau",  email="xsuaucuadros@apple.com"},
+    {name="Luca Zappella", email="lzappella@apple.com"},
+    {name="Nick Apostoloff",  email="napostoloff@apple.com"},
+]
+license= {"file" = "LICENSE.txt"}
+readme = "README.md"
+requires-python = ">=3.8"
+dynamic = ["version", "description"]  # Flit will fill these in for us
+
+classifiers = [
+    # TODO: remove this classifier
+    'Private :: Do Not Upload to pypi server',
+    'Topic :: Scientific/Engineering :: Artificial Intelligence',
+    'Topic :: Scientific/Engineering :: Information Analysis',
+    'Development Status :: 3 - Alpha',
+    'Programming Language :: Python :: 3.6',
+    'Programming Language :: Python :: 3.7',
+    'Programming Language :: Python :: 3.8',
+    'Intended Audience :: Developers',
+    'Intended Audience :: Education',
+    'Intended Audience :: Science/Research'
+]
+
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "scipy",
+    "sklearn",
+    "pandas",
+    "tqdm",
+    "transformers",
+    "torch",
+    "torchvision",
+    "pyprg"
+]
+
+[project.optional-dependencies]
+# Packages required for testing
+test = [
+    "pytest >= 6.0",
+    "pytest-mypy",
+]
+
+[project.urls]
+# TODO: update homepage with github link
+homepage = "<TODO: replace with final github destination>"
+paper = "https://arxiv.org/abs/2110.02802"
+
+
+# Pytest options
+# ============================================================================
+[tool.pytest.ini_options]
+# This determines where test are found
+testpaths = ["selfcond/"]
+
+# Run pytest with these options by default
+# Enables: mypy, flake8, and coverage.py
+addopts = [
+   "--mypy",
+]
+
+markers = "slow: marks tests as slow (deselect with '-m \"not slow\"' serial"
+
+
+# Mypy options
+# ============================================================================
+[tool.mypy]
+ignore_missing_imports = true
+
+# Specific settings for speech gaze
+[[tool.mypy.overrides]]
+module="selfcond"
+# Disallow calls from functions with type annotation to functions with no type annotations
+disallow_untyped_calls = false
+# Disallow defs with no or incomplete type annotations
+disallow_untyped_defs = true
+# Type-check inside functions with no type annotations
+check_untyped_defs = true
+# Warns about uneeded ignore comments
+warn_unused_ignores = true
+
+# Black options
+# ============================================================================
+[tool.black]
+line-length = 100
+ include = '\.pyi?$'
+ exclude = '''
+ /(
+     \.git
+   | \.hg
+   | \.mypy_cache
+   | \.tox
+   | \.venv
+ )/
+ '''
+ experimental_string_processing = true
+
